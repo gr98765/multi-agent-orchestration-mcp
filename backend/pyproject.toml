@@ -1,0 +1,36 @@
+[project]
+name = "analystcrew"
+version = "0.1.0"
+description = "AI agents that write verified company research reports from official SEC data."
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.27",          # downloads data from websites
+    "python-dotenv>=1.0",   # reads secrets from the .env file
+    "pydantic>=2.0",        # defines the shape of our data ("forms")
+    "mcp[cli]>=2.0",        # the Model Context Protocol: turns functions into AI tools
+    "yfinance>=0.2",        # stock prices from Yahoo Finance
+]
+
+[project.scripts]
+analystcrew-mcp = "analystcrew.mcp_server:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.5"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/analystcrew"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["src", "tests"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
