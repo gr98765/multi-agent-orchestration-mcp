@@ -9,6 +9,11 @@ dependencies = [
     "pydantic>=2.0",        # defines the shape of our data ("forms")
     "mcp[cli]>=2.0",        # the Model Context Protocol: turns functions into AI tools
     "yfinance>=0.2",        # stock prices from Yahoo Finance
+    "langchain>=1.4",       # connects to the AI model (init_chat_model)
+    "langchain-core>=1.7",  # messages and tools the agents use
+    "langchain-google-genai>=4.4",  # connects LangChain to Gemini
+    "langgraph>=1.2",       # runs the agents as steps in a graph
+    "langsmith>=0.14.12",   # optional tracing: a timeline of every step (see tracing.py)
 ]
 
 [project.scripts]

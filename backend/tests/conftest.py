@@ -1,11 +1,55 @@
 """Shared test setup: a fake SEC that answers like the real one (Nvidia's real numbers).
 
-Tests never touch the internet: we swap sec.py's web client for this fake."""
+Tests never touch the internet: we swap sec.py's web client for this fake.
 
+Tests can never send a LangSmith trace. Three locks, each enough on its own:
+1. The real .env file is never read (load_dotenv is replaced before analystcrew is imported).
+2. Before each test, LANGSMITH_TRACING is "false" and every API key is removed.
+3. tracing.setup_tracing() refuses to turn tracing on while pytest is running."""
+
+import os
+
+import dotenv
 import httpx
 import pytest
 
-from analystcrew.data import sec
+# Must run before analystcrew is imported: its modules load .env when they are imported.
+_no_dotenv = pytest.MonkeyPatch()
+_no_dotenv.setattr(dotenv, "load_dotenv", lambda *args, **kwargs: False)
+
+from langsmith import utils as ls_utils  # noqa: E402
+
+from analystcrew import audit  # noqa: E402
+from analystcrew.data import sec  # noqa: E402
+
+_TRACING_SWITCHES = ("LANGSMITH_TRACING", "LANGSMITH_TRACING_V2", "LANGCHAIN_TRACING_V2",
+                     "LANGCHAIN_TRACING")
+
+
+def _private_vars() -> list[str]:
+    """Variables that could hold a real key or point traces somewhere (checked each time)."""
+    return [
+        name for name in os.environ
+        if name.startswith(("LANGSMITH_", "LANGCHAIN_")) or name.endswith("_API_KEY")
+    ]
+
+
+# Also lock tracing off for test collection, before any fixture runs.
+for _name in _private_vars():
+    del os.environ[_name]
+os.environ["LANGSMITH_TRACING"] = "false"
+
+
+@pytest.fixture(autouse=True)
+def no_tracing(monkeypatch):
+    """Before each test: tracing switched off and no LangSmith key, whatever the shell has."""
+    for name in _private_vars():
+        monkeypatch.delenv(name, raising=False)
+    for name in _TRACING_SWITCHES:
+        monkeypatch.setenv(name, "false")
+    ls_utils.get_env_var.cache_clear()  # LangSmith caches env values; make it re-read them
+    yield
+    ls_utils.get_env_var.cache_clear()  # don't let one test's values leak into the next
 
 CIK = 1045810
 K25 = ("10-K", "0001045810-25-000023", "2025-02-26", 2025, "FY")
@@ -147,7 +191,8 @@ def fake_sec_handler(request: httpx.Request) -> httpx.Response:
 
 @pytest.fixture(autouse=True)
 def fake_sec(monkeypatch, tmp_path):
-    """Every test gets the fake SEC, an empty temporary cache, and a test User-Agent."""
+    """Every test gets the fake SEC, an empty temporary cache, a test User-Agent,
+    and a temporary audit log folder (so tests never write to the real reports/)."""
     calls = []
 
     def handler(request):
@@ -157,6 +202,7 @@ def fake_sec(monkeypatch, tmp_path):
     monkeypatch.setattr(sec, "_client", httpx.Client(
         transport=httpx.MockTransport(handler)))
     monkeypatch.setattr(sec, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(audit, "REPORTS_DIR", tmp_path / "reports")
     monkeypatch.setattr(sec.time, "sleep", lambda s: None)
     monkeypatch.setenv("SEC_USER_AGENT", "Test User test@example.com")
     return calls
