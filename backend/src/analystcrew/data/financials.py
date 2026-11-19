@@ -10,6 +10,9 @@ Real-world wrinkles handled here (good interview material):
   so every metric has an ordered list of fallback concepts.
 * Some metrics can't be derived by subtraction (EPS: share counts change). We never guess:
   anything we can't source is returned as status="not_found" with an explanation.
+* Companies announce a quarter in an earnings release (8-K) weeks before the 10-Q. For the
+  latest quarter we check that release too (earnings.py); if it covers a newer quarter than
+  the filings, its figures are used and their source is labeled "earnings release".
 """
 
 from __future__ import annotations
@@ -20,7 +23,8 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from .sec import filing_folder_url, find_company, get_company_facts
+from .earnings import EarningsRelease, is_newer, latest_release
+from .sec import SecError, filing_folder_url, find_company, get_company_facts
 
 QUARTER_DAYS = (80, 100)
 ANNUAL_DAYS = (350, 380)
@@ -71,6 +75,8 @@ class Source(BaseModel):
     accession: str
     filed: str
     url: str
+    # "filing" = a 10-K/10-Q number; "earnings release" = read from an 8-K press release
+    kind: Literal["filing", "earnings release"] = "filing"
 
 
 class MetricValue(BaseModel):
@@ -451,6 +457,68 @@ def build_report(
     )
 
 
+# ---------- newer quarter from an earnings release ----------
+
+
+def from_release(release: EarningsRelease, latest: FinancialReport) -> FinancialReport | None:
+    """A report for the quarter right after `latest`, using the earnings release's figures.
+
+    None if the release isn't exactly one quarter later (then we can't be sure which fiscal
+    quarter it is, so we don't use it)."""
+    if latest.fiscal_quarter is None:
+        return None
+    gap = (_d(release.period_end) - _d(latest.period_end)).days
+    if not _in(gap, QUARTER_DAYS):
+        return None
+    quarter = latest.fiscal_quarter % 4 + 1
+    year = latest.fiscal_year + (1 if latest.fiscal_quarter == 4 else 0)
+    start = (_d(latest.period_end) + timedelta(1)).isoformat()
+    f = release.filing
+    source = Source(form=f.form, accession=f.accession, filed=f.filing_date, url=release.url,
+                    kind="earnings release")
+    metrics = []
+    for name, spec in METRICS.items():
+        base = {"metric": name, "unit": spec.unit, "period_start": start,
+                "period_end": release.period_end}
+        if name in release.values:
+            metrics.append(MetricValue(
+                **base, status="reported", value=release.values[name], sources=[source],
+                note="From the earnings release (8-K). The 10-Q for this quarter isn't filed yet.",
+            ))
+        else:
+            metrics.append(MetricValue(
+                **base, status="not_found",
+                note="Not read from the earnings release; it will be in the 10-Q once filed.",
+            ))
+    notes = [
+        f"Fiscal {year} Q{quarter} comes from the earnings release (8-K filed {f.filing_date}), "
+        f"which is newer than the latest 10-Q (quarter ended {latest.period_end}).",
+        "Values are in the listed unit (USD, not millions). status='not_found' means no "
+        "official figure exists in the data; never substitute an estimate.",
+    ]
+    return latest.model_copy(update={
+        "fiscal_year": year, "fiscal_quarter": quarter, "period_start": start,
+        "period_end": release.period_end, "metrics": metrics, "notes": notes,
+    })
+
+
+def _with_newer_release(cik: int, report: FinancialReport) -> FinancialReport:
+    """Swap in the earnings release's quarter if it is newer than the filings' quarter."""
+    try:
+        release = latest_release(cik)
+    except SecError as e:
+        note = f"Could not check the newest earnings release ({e}); using filed reports."
+        return report.model_copy(update={"notes": report.notes + [note]})
+    if release is None or not is_newer(release, report.period_end):
+        return report
+    newer = from_release(release, report)
+    if newer is None:
+        note = (f"An earnings release covers a later period (ended {release.period_end}), "
+                "but it isn't exactly the next quarter, so it was not used.")
+        return report.model_copy(update={"notes": report.notes + [note]})
+    return newer
+
+
 # ---------- the one function most code will call ----------
 
 
@@ -464,7 +532,8 @@ def get_financials(
 
     company: a ticker ("NVDA") or name ("nvidia")
     fiscal_year + quarter: a specific period; quarter=None means the full year
-    latest_quarter: the most recently filed quarter (no need to know the fiscal calendar)
+    latest_quarter: the most recent quarter (no need to know the fiscal calendar). This also
+        checks the newest earnings release (8-K), which can be a quarter ahead of the 10-Q.
     """
     found = find_company(company)
     if found is None:
@@ -475,4 +544,6 @@ def get_financials(
         raise ValueError(
             f"Not Found: the SEC has no financial data for {found.name}.")
     report = build_report(facts, fiscal_year, quarter, latest_quarter)
+    if latest_quarter:
+        report = _with_newer_release(found.cik, report)
     return report.model_copy(update={"ticker": found.ticker, "company": found.name})

@@ -44,6 +44,9 @@ def build_tools(notes: ResearchNotes, run_id: str | None = None) -> list[BaseToo
     def financials(company: str) -> str:
         """Latest official numbers (revenue, net income, EPS, cash, etc.) for a company."""
         report = get_financials(company, latest_quarter=True)
+        notes.fiscal_year = report.fiscal_year
+        notes.fiscal_quarter = report.fiscal_quarter
+        notes.period_end = report.period_end
         period = f"FY{report.fiscal_year}"
         if report.fiscal_quarter:
             period += f" Q{report.fiscal_quarter}"
@@ -54,10 +57,14 @@ def build_tools(notes: ResearchNotes, run_id: str | None = None) -> list[BaseToo
                 lines.append(f"- {m.metric}: Not Found")
                 continue
             value = _money(m.value, m.unit)
-            url = m.sources[0].url if m.sources else None
+            source = m.sources[0] if m.sources else None
+            label = m.status
+            if source and source.kind == "earnings release":
+                label += ", earnings release"
             ev = notes.add(
-                "financial", f"{m.metric} ({m.status})", value=value, url=url, number=m.value)
-            lines.append(f"- {ev.id} {m.metric}: {value} [{m.status}]")
+                "financial", f"{m.metric} ({label})", value=value,
+                url=source.url if source else None, number=m.value)
+            lines.append(f"- {ev.id} {m.metric}: {value} [{label}]")
         return "\n".join(lines)
 
     @tool
@@ -67,10 +74,15 @@ def build_tools(notes: ResearchNotes, run_id: str | None = None) -> list[BaseToo
         cik = find_company(company).cik
         lines = []
         for f in list_filings(cik, limit=5):
+            earnings = f.form == "8-K" and "2.02" in f.items.split(",")
+            summary = f"{f.form} filed {f.filing_date}"
+            if earnings:
+                summary += " (earnings release)"
             ev = notes.add(
-                "filing", f"{f.form} filed {f.filing_date}", url=f.url)
-            lines.append(
-                f"- {ev.id} {f.form} filed {f.filing_date} (period {f.report_date})")
+                "filing", summary, url=f.url, published_date=f.filing_date, form=f.form,
+                period_end=f.report_date if f.form != "8-K" else None,
+                earnings_release=earnings)
+            lines.append(f"- {ev.id} {summary} (period {f.report_date})")
         return "\n".join(lines) or "No recent filings found."
 
     @tool

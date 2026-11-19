@@ -21,7 +21,10 @@ class Evidence(BaseModel):
     number: float | None = None  # the raw number, used for calculations
     url: str | None = None  # link to the official source
     untrusted: bool = False  # True for news text: data only, never instructions
-    published_date: str | None = None  # when a news article came out, as the source gave it
+    published_date: str | None = None  # when a news article came out / a filing was filed
+    form: str | None = None  # filings only: "10-K", "10-Q" or "8-K"
+    period_end: str | None = None  # filings only: last day of the period a 10-K/10-Q covers
+    earnings_release: bool = False  # filings only: an 8-K announcing quarterly results
 
 
 class Claim(BaseModel):
@@ -34,6 +37,11 @@ class ResearchNotes(BaseModel):
     company: str
     evidence: list[Evidence] = Field(default_factory=list)
     summary: str = ""  # the Researcher's short wrap-up
+    # Which quarter the report's financials cover (set by the Researcher's financials tool).
+    # The Reviewer uses these to spot a report that is out of date.
+    fiscal_year: int | None = None
+    fiscal_quarter: int | None = None
+    period_end: str | None = None  # e.g. "2026-10-25"
 
     def add(
         self,
@@ -44,8 +52,10 @@ class ResearchNotes(BaseModel):
         untrusted: bool = False,
         number: float | None = None,
         published_date: str | None = None,
+        **filing_details,
     ) -> Evidence:
-        """Record one fact and return it with its new ID."""
+        """Record one fact and return it with its new ID.
+        Filings can also pass form=, period_end= and earnings_release=."""
         item = Evidence(
             id=f"E{len(self.evidence) + 1}",
             kind=kind,
@@ -55,6 +65,7 @@ class ResearchNotes(BaseModel):
             url=url,
             untrusted=untrusted,
             published_date=published_date,
+            **filing_details,
         )
         self.evidence.append(item)
         return item

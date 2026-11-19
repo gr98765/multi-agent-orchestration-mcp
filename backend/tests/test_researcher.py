@@ -258,3 +258,39 @@ def test_prior_year_quarter_missing_revenue_says_not_found(monkeypatch):
 
     assert notes.evidence == []
     assert tool_messages(model)[0].content.endswith("- revenue: Not Found")
+
+
+def test_earnings_release_figures_are_labeled_and_period_recorded(monkeypatch):
+    from_8k = Source(form="8-K", accession="0001045810-25-000200", filed="2025-02-26",
+                     url="https://www.sec.gov/fake-pr", kind="earnings release")
+    newer = REPORT.model_copy(update={
+        "fiscal_quarter": 4, "period_start": "2024-10-28", "period_end": "2025-01-26",
+        "metrics": [MetricValue(metric="revenue", status="reported", value=39_331_000_000,
+                                unit="USD", sources=[from_8k])],
+    })
+    monkeypatch.setattr(researcher, "get_financials", lambda company, **kw: newer)
+    model = use_model(
+        monkeypatch, [call("financials", {"company": "NVDA"}, "c1"), AIMessage(content="E1.")])
+
+    notes = researcher.run_research("NVDA")
+
+    assert (notes.fiscal_year, notes.fiscal_quarter, notes.period_end) == (2025, 4, "2025-01-26")
+    [ev] = notes.evidence
+    assert ev.summary == "revenue (reported, earnings release)"
+    assert ev.url == "https://www.sec.gov/fake-pr"
+    assert "[reported, earnings release]" in tool_messages(model)[0].content
+
+
+def test_filings_record_form_period_and_earnings_flag(monkeypatch):
+    earnings = FILINGS[1].model_copy(update={"items": "2.02,9.01"})
+    monkeypatch.setattr(researcher, "list_filings", lambda cik, limit: [FILINGS[0], earnings])
+    use_model(monkeypatch, [call("filings", {"company": "NVDA"}, "c1"), AIMessage(content="ok")])
+
+    notes = researcher.run_research("NVDA")
+
+    ten_k, eight_k = notes.evidence
+    assert (ten_k.form, ten_k.period_end, ten_k.published_date) == (
+        "10-K", "2025-01-26", "2025-02-26")
+    assert not ten_k.earnings_release
+    assert eight_k.earnings_release and eight_k.period_end is None
+    assert eight_k.summary == "8-K filed 2025-02-26 (earnings release)"

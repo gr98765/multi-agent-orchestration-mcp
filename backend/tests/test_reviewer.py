@@ -179,3 +179,82 @@ def test_issues_from_several_sentences_are_all_reported(notes):
         (2, "unknown_id"),
         (2, "stale_news"),
     ]
+
+
+# ---------- out-of-date reports ----------
+
+HONEST = [Claim(text="Revenue was $35.08B.", evidence_ids=["E1"])]
+
+
+@pytest.fixture
+def q3_notes() -> ResearchNotes:
+    """A report on FY2025 Q3 (quarter ended 2024-10-27), with its own 10-Q and 8-K."""
+    n = ResearchNotes(company="NVDA", fiscal_year=2025, fiscal_quarter=3,
+                      period_end="2024-10-27")
+    n.add("financial", "revenue (reported)", value="$35.08B", number=35_082_000_000)  # E1
+    n.add("filing", "10-Q filed 2024-11-20", published_date="2024-11-20", form="10-Q",
+          period_end="2024-10-27")  # E2: the quarter the report covers
+    n.add("filing", "8-K filed 2024-11-20 (earnings release)", published_date="2024-11-20",
+          form="8-K", earnings_release=True)  # E3: this quarter's own earnings release
+    return n
+
+
+def out_of_date(result) -> list[str]:
+    return [i.message for i in result.issues if i.check == "out_of_date"]
+
+
+def test_current_report_is_not_out_of_date(q3_notes):
+    assert review(HONEST, q3_notes, today=date(2024, 12, 1)).passed
+
+
+def test_newer_10k_flags_stale_period(q3_notes):
+    q3_notes.add("filing", "10-K filed 2025-02-26", published_date="2025-02-26", form="10-K",
+                 period_end="2025-01-26")
+
+    result = review(HONEST, q3_notes, today=date(2025, 3, 1))
+
+    assert not result.passed
+    [message] = out_of_date(result)
+    assert message.startswith("Report may be out of date")
+    assert "FY2025 Q3" in message and "quarter ended 2025-01-26" in message
+    assert result.issues[-1].sentence is None  # about the whole report, not one sentence
+
+
+def test_later_earnings_release_flags_stale_period(q3_notes):
+    """An earnings 8-K filed 122 days after Q3 ended must be about a later quarter."""
+    q3_notes.add("filing", "8-K filed 2025-02-26 (earnings release)",
+                 published_date="2025-02-26", form="8-K", earnings_release=True)
+
+    [message] = out_of_date(review(HONEST, q3_notes, today=date(2025, 3, 1)))
+
+    assert "the quarter after FY2025 Q3 (earnings release filed 2025-02-26)" in message
+
+
+def test_non_earnings_8k_is_ignored(q3_notes):
+    q3_notes.add("filing", "8-K filed 2025-06-30", published_date="2025-06-30", form="8-K")
+
+    assert review(HONEST, q3_notes, today=date(2025, 7, 1)).passed
+
+
+def test_news_about_newer_quarters_results_flags_stale_period(q3_notes):
+    q3_notes.add("news", "Nvidia fourth-quarter fiscal 2025 results beat estimates",
+                 value="...", untrusted=True, published_date="2025-02-27")  # E4
+
+    [message] = out_of_date(review(HONEST, q3_notes, today=date(2025, 3, 1)))
+
+    assert "FY2025 Q4 (named in news E4, published 2025-02-27)" in message
+
+
+def test_news_forecasting_a_future_quarter_is_not_stale(q3_notes):
+    """Q4 FY25 guidance written before Q4 ended is a forecast, not newer results."""
+    q3_notes.add("news", "Nvidia guides Q4 FY25 revenue higher", value="Outlook for Q4 FY2025.",
+                 untrusted=True, published_date="2024-11-21")
+
+    assert review(HONEST, q3_notes, today=date(2024, 12, 1)).passed
+
+
+def test_unknown_report_period_skips_the_check(notes):
+    notes.add("filing", "10-K filed 2026-02-25", published_date="2026-02-25", form="10-K",
+              period_end="2026-01-25")
+
+    assert out_of_date(review(HONEST, notes, today=TODAY)) == []

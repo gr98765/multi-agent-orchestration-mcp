@@ -4,6 +4,7 @@ Three jobs:
   1. find_company / search_companies: "NVDA" or "nvidia" -> Nvidia's official name and ID
   2. get_company_facts: download every financial number a company has reported
   3. list_filings: its recent official reports, with links
+     (exhibit_url finds one document inside a filing, such as an 8-K's press release)
 
 The SEC's data is free, but it requires a "User-Agent": your name and email, sent with
 every request. We also save each download to disk (a cache), so running the same thing
@@ -15,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -54,6 +56,8 @@ class Filing(BaseModel):
     report_date: str | None  # the period the report covers
     accession: str  # the SEC's ID for this filing
     url: str  # direct link to the document
+    # 8-K only: what the event was, as SEC item codes. "2.02" = earnings results.
+    items: str = ""
 
 
 # ---------- downloading (with cache) ----------
@@ -68,13 +72,12 @@ def _http() -> httpx.Client:
     return _client
 
 
-def _download_json(url: str) -> dict | None:
-    """Fetch a JSON file from the SEC, using the disk cache when possible.
+def _download_text(url: str) -> str | None:
+    """Fetch a file from the SEC as text, using the disk cache when possible.
     Returns None if the SEC says the file doesn't exist (HTTP 404)."""
-    cache_file = CACHE_DIR / \
-        (hashlib.sha256(url.encode()).hexdigest() + ".json")
+    cache_file = CACHE_DIR / (hashlib.sha256(url.encode()).hexdigest() + ".cache")
     if cache_file.exists() and time.time() - cache_file.stat().st_mtime < CACHE_HOURS * 3600:
-        return json.loads(cache_file.read_text())
+        return cache_file.read_text(encoding="utf-8")
 
     user_agent = (os.getenv("SEC_USER_AGENT") or "").strip()
     if "@" not in user_agent:
@@ -101,10 +104,15 @@ def _download_json(url: str) -> dict | None:
         raise SecError(
             f"The SEC returned HTTP {response.status_code}. Try again later.")
 
-    data = response.json()
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    cache_file.write_text(json.dumps(data))
-    return data
+    cache_file.write_text(response.text, encoding="utf-8")
+    return response.text
+
+
+def _download_json(url: str) -> dict | None:
+    """Fetch a JSON file from the SEC (cached). None if it doesn't exist."""
+    text = _download_text(url)
+    return json.loads(text) if text is not None else None
 
 
 # ---------- job 1: find companies ----------
@@ -160,6 +168,7 @@ def list_filings(cik: int, forms: tuple[str, ...] = MAIN_FORMS, limit: int = 10)
     if not data:
         return []
     recent = data["filings"]["recent"]  # the SEC stores this as parallel lists
+    items = recent.get("items") or [""] * len(recent["form"])
     filings: list[Filing] = []
     for i, form in enumerate(recent["form"]):
         if form not in forms:
@@ -173,8 +182,27 @@ def list_filings(cik: int, forms: tuple[str, ...] = MAIN_FORMS, limit: int = 10)
                 accession=accession,
                 url=filing_folder_url(cik, accession) +
                 recent["primaryDocument"][i],
+                items=items[i] or "",
             )
         )
         if len(filings) >= limit:
             break
     return filings
+
+
+def exhibit_url(cik: int, accession: str, exhibit: str = "EX-99.1") -> str | None:
+    """Link to one exhibit inside a filing (EX-99.1 is usually an 8-K's press release).
+
+    The filing's index page lists every document with its type. None if there is no such
+    exhibit."""
+    index = _download_text(filing_folder_url(cik, accession) + f"{accession}-index.html")
+    if not index:
+        return None
+    for row in re.findall(r"<tr[^>]*>(.*?)</tr>", index, re.S | re.I):
+        cells = re.findall(r"<td[^>]*>(.*?)</td>", row, re.S | re.I)
+        types = [re.sub(r"<[^>]+>", "", c).strip() for c in cells]
+        link = re.search(r'href="([^"]+)"', row)
+        if link and exhibit in types:
+            href = link.group(1)
+            return href if href.startswith("http") else "https://www.sec.gov" + href
+    return None
