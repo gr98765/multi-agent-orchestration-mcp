@@ -8,6 +8,7 @@ Anything that speaks MCP (Claude Desktop, Cursor, or our own agents) can connect
   5. get_price_performance  how the stock moved between two dates
 
 Every tool is read-only: it can look at data but never change anything.
+Every call is recorded in reports/audit.log (see audit.py).
 
 Run it:  python -m analystcrew.mcp_server
 """
@@ -23,6 +24,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel
 
+from .audit import audited, new_run_id
 from .data import sec
 from .data.financials import FinancialReport
 from .data.financials import get_financials as _get_financials
@@ -72,11 +74,17 @@ def _company(query: str) -> Company:
     return found
 
 
+# Every tool call is written to reports/audit.log. One run ID per server process.
+RUN_ID = new_run_id()
+audit = audited(RUN_ID)
+
+
 # ---------- the 5 tools ----------
 
 
 @mcp.tool(annotations=READ_ONLY)
 @friendly_errors
+@audit
 def resolve_company(query: str) -> Company:
     """Look up a US public company by ticker ("NVDA") or name ("nvidia").
     Returns its ticker, SEC ID number (CIK), and official name."""
@@ -85,6 +93,7 @@ def resolve_company(query: str) -> Company:
 
 @mcp.tool(annotations=READ_ONLY)
 @friendly_errors
+@audit
 def get_financials(
     company: str,
     fiscal_year: int | None = None,
@@ -103,6 +112,7 @@ def get_financials(
 
 @mcp.tool(annotations=READ_ONLY)
 @friendly_errors
+@audit
 def list_filings(company: str, limit: int = 5) -> list[Filing]:
     """The company's latest official reports, newest first, with links:
     10-K (annual), 10-Q (quarterly), and 8-K (events, including earnings announcements)."""
@@ -117,6 +127,7 @@ class NewsResults(BaseModel):
 
 @mcp.tool(annotations=READ_ONLY)
 @friendly_errors
+@audit
 def search_news(query: str, days: int = 90, max_results: int = 5) -> NewsResults:
     """Recent news articles with titles, links, dates, and short snippets.
     Use specific queries, e.g. "Nvidia data center revenue guidance"."""
@@ -125,6 +136,7 @@ def search_news(query: str, days: int = 90, max_results: int = 5) -> NewsResults
 
 @mcp.tool(annotations=READ_ONLY)
 @friendly_errors
+@audit
 def get_price_performance(ticker: str, start_date: str, end_date: str) -> PricePerformance:
     """How a stock moved between two dates (YYYY-MM-DD): start and end closing prices,
     % change, and the highest and lowest prices in between."""
